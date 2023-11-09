@@ -1,24 +1,28 @@
 require 'elasticsearch'
 require 'json'
+require 'translit'
+require 'lingua/stemmer'
+
+stemmer = Lingua::Stemmer.new(:language => "ru")
 
 # Устанавливаем клиент Elasticsearch
 client = Elasticsearch::Client.new log: true
 
 # Указываем имя индекса
-index = 'vacancy_index_3'
+index = 'vacancy_index_15'
 
 data = JSON.parse(File.read('dictionary.json'))
 synonyms = []
 
-data['wordlist'].last(10).each do |item|
-  next unless item['synonyms']
-  name_value = item['name']
-  synonyms_values = item['synonyms'].join(', ') if item['synonyms']
-
-  synonyms << "#{name_value}, #{synonyms_values}"
-end
-
-
+# перевод с английского в русский (у мишы попросить) фанетическая транслитерация 
+# 
+professions = [
+  'питон', 'c++', 'c#','с++', 'с++', '1c', 'ux', 'ui', 'c#', 'курьер', 'доставщик',
+  'математик', 'информатик', 'физик',
+  'преподаватель', 'репетитор', 'бариста',
+  'администратор', 'админ', 'call-центр',
+  'фитнес-центр', 'фитнес-клуб', 'ресторан',
+].map { stemmer.stem(_1.downcase) }
 
 # Проверяем существование индекса
 unless client.indices.exists(index: index)
@@ -29,17 +33,18 @@ unless client.indices.exists(index: index)
           type: "synonym",
           synonyms: [
             "курьер, кура, доставщик",
-            "программист, разработчик, прогер",
-            "препод, преподаватель, учитель, репетитор",
-            "бариста, кофейщик",
-            "python, питон",
-            "разработчик, девелопер",
-            "hr, кадровик, рекрутер",
-            "язык программирования, C, C++, C#",
-            "колл-центр, колл центр, call center, колл-центрщик",
-            "администратор, админ, админка",
-            "преподаватель, учитель, лектор",
-            "курьер, доставщик",
+            "программист, прогер, девелопер, developer => разработчик",
+            "репетитор^2 => учитель",
+            "кофе, кофейщик => бариста,",
+            "питон, пайтон => python",
+            "кадровик, рекрутер, менеджер по найму => hr",
+            "c, c++, C, C++, Ц++ => c++",
+            "фитнес-клуб => фитнес-центр",
+            "колл-центр, колл центр, call center, колл-центр => call-центр",
+            "администратор, админка => админ",
+            "оператор, косультант",
+            "преподаватель, лектор",
+            "доставка, курьером, доставщик => курьер",
           ]
         },
         ru_stop: {
@@ -81,7 +86,8 @@ unless client.indices.exists(index: index)
         index: true,
         search_analyzer: "my_synonyms",
         analyzer: "my_synonyms",
-        term_vector: "with_positions_offsets_payloads"
+        term_vector: "with_positions_offsets_payloads",
+        boost: 2
       },
       salary: { 
         type: "text",
@@ -124,6 +130,14 @@ unless client.indices.exists(index: index)
         search_analyzer: "my_synonyms",
         analyzer: "my_synonyms",
         term_vector: "with_positions_offsets_payloads"
+      },
+      professions: {
+        type: "text",
+        index: true,
+        search_analyzer: "my_synonyms",
+        analyzer: "my_synonyms",
+        term_vector: "with_positions_offsets_payloads",
+        boost: 3 
       }
     }
   }
@@ -135,7 +149,15 @@ unless client.indices.exists(index: index)
   data = JSON.parse(File.read('vacancy_data.json'))
 
   # Индексируем данные
+  delimiters = [',', '/']
   data.each do |item|
+    profession = ""
+
+    splitted = item['Title'].split(Regexp.union(delimiters)).map { stemmer.stem(_1.downcase) }
+    splitted.each do |split|
+      profession += "#{split} " if professions.include?(split)
+    end
+
     document = {
       url: item['url'],
       title: item['Title'],
@@ -144,37 +166,44 @@ unless client.indices.exists(index: index)
       description: item['description'],
       skills: item['skills'],
       dream_job: item['dreamJob'],
-      recommendation_percent: item['recomendationPercent']
+      recommendation_percent: item['recomendationPercent'],
+      professions: profession
     }
 
     client.index(index: index, body: document)
   end
 end
-# print 'НАСТРОЙКИ ПОИСКА:'
 
-# print 'Искать в названии вакансии? (yes/no): '
-# search_title = gets.chomp.downcase == 'yes'
+puts Translit.convert("call-центр", :russian)
 
-# print 'Искать в описании вакансии? (yes/no): '
-# search_description = gets.chomp.downcase == 'yes'
+print 'НАСТРОЙКИ ПОИСКА:'
 
-# print 'Сколько записей вывести (10, 20, все): '
-# records_count = gets.chomp
+print 'Искать в названии вакансии? (yes/no): '
+search_title = gets.chomp.downcase == 'yes'
 
-#  # Определяем поля для поиска в зависимости от флагов
-#  search_fields = []
-#  search_fields << 'title' if search_title
-#  search_fields << 'description' if search_description
+print 'Искать в описании вакансии? (yes/no): '
+search_description = gets.chomp.downcase == 'yes'
 
- # В зависимости от количества записей, задаем размер вывода
-#  size = if records_count == 'all'
-#           nil
-#         else
-#           records_count.to_i
-#         end
+print 'Искать в skills вакансии? (yes/no): '
+search_skills = gets.chomp.downcase == 'yes'
+
+print 'Сколько записей вывести (10, 20, все): '
+records_count = gets.chomp
+
+ # Определяем поля для поиска в зависимости от флагов
+ search_fields = []
+ search_fields << 'title^3' if search_title
+ search_fields << 'description^1' if search_description
+ search_fields << 'skills^1' if search_skills
+ search_fields << 'professions^3'
+ #В зависимости от количества записей, задаем размер вывода
+ size = if records_count == 'all'
+          nil
+        else
+          records_count.to_i
+        end
 
 size = 10
-
 # Основной цикл для выполнения поисковых запросов
 loop do
   print 'Введите запрос (или "exit" для выхода): '
@@ -186,8 +215,8 @@ loop do
   response = client.search(index: index, body: {
     query: {
       multi_match: {
-        query: query,
-        fields: ['title'],
+        query: query, # Translit.convert(query, :russian) - только ухудшает поиск
+        fields: search_fields,
         fuzziness: "AUTO",  # Apply fuzziness for these specific fields
         analyzer: 'my_synonyms' # Use the custom "my_synonyms" analyzer
       }
